@@ -38,23 +38,26 @@ __global__ void adv_Velocity_Update( int nbodies, planet<T> *bodies)
 {
 
 	int i = threadIdx.x + blockIdx.x*blockDim.x;
-	int j = threadIdx.y + blockIdx.y*blockDim.y;
 	
-	if (i < nbodies && j < nbodies)
+	if (i < nbodies)
 	{
-		planet<T> &b = bodies[i];
-		planet<T> &b2 = bodies[j];
-		T dx = b.x - b2.x;
-		T dy = b.y - b2.y;
-		T dz = b.z - b2.z;
-		T inv_distance = 1.0/sqrt(dx * dx + dy * dy + dz * dz);
-		T mag = inv_distance * inv_distance * inv_distance;
-		b.vx  -= dx * b2.mass * mag;
-		b.vy  -= dy * b2.mass * mag;
-		b.vz  -= dz * b2.mass * mag;
-		b2.vx += dx * b.mass  * mag;
-		b2.vy += dy * b.mass  * mag;
-		b2.vz += dz * b.mass  * mag;
+
+		planet<T> &b1 = bodies[i];
+		for (int j = i + 1; j < nbodies; j++) 
+		{
+			planet<T> &b2 = bodies[j];
+			T dx = b1.x - b2.x;
+			T dy = b1.y - b2.y;
+			T dz = b1.z - b2.z;
+			T inv_distance = 1.0 / sqrt(dx * dx + dy * dy + dz * dz);
+			T mag = inv_distance * inv_distance * inv_distance;
+			b1.vx -= dx * b2.mass * mag;
+			b1.vy -= dy * b2.mass * mag;
+			b1.vz -= dz * b2.mass * mag;
+			b2.vx += dx * b1.mass  * mag;
+			b2.vy += dy * b1.mass  * mag;
+			b2.vz += dz * b1.mass  * mag;
+		}
 	}
 }
 
@@ -71,6 +74,44 @@ __global__ void adv_Position_Update( int nbodies, planet<T> *bodies)
 		b.y += b.vy;
 		b.z += b.vz;
 	}
+}
+
+template <typename T>
+__global__ void scale_bodies_GPU(int nbodies, planet<T> *bodies, T scale)
+{
+	int i = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (i < nbodies)
+	{
+		bodies[i].mass *= scale*scale;
+		bodies[i].vx *= scale;
+		bodies[i].vy *= scale;
+		bodies[i].vz *= scale;
+	}
+}
+
+template <typename T>
+__global__ void energy_GPU(int nbodies, planet<T> *bodies)
+{
+	T e = 0.0;
+	int i = threadIdx.x + blockIdx.x*blockDim.x;
+	int j = i + 1;
+
+	if (i < nbodies)
+	{
+		planet<T> &b = bodies[i];
+		e += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
+		if (j < nbodies)
+		{
+			planet<T> &b2 = bodies[j];
+			T dx = b.x - b2.x;
+			T dy = b.y - b2.y;
+			T dz = b.z - b2.z;
+			T distance = sqrt(dx * dx + dy * dy + dz * dz);
+			e -= (b.mass * b2.mass) / distance;
+		}
+	}
+	//return e; need to return this type
 }
 
 template <typename T>
@@ -121,6 +162,7 @@ T energy(int nbodies, planet<T> *bodies)
   }
   return e;
 }
+
 template <typename T>
 void offset_momentum(int nbodies, planet<T> *bodies)
 {
@@ -219,15 +261,29 @@ void kernalUpdate(int nbodies, planet<T> *bodies)
 	//Copy data from CPU
 	cudaMalloc(&Gbodies, nbodies*sizeof(planet<T>));
 	cudaMemcpy(Gbodies, bodies, nbodies, cudaMemcpyHostToDevice);
-	
+
+	//Scaling
+	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+	scale_bodies_GPU << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies, DT);
+	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+
 	//velocity
-	adv_Velocity_Update<<<nbodies, ceil(nbodies/2)>>>(nbodies, Gbodies);
-	
+	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+	adv_Velocity_Update<<<1, nbodies>>>(nbodies, Gbodies);
+	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+
 	//position
-	adv_Position_Update<<<nbodies, 1>>>(nbodies, Gbodies);
+	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+	adv_Position_Update << <nbodies, ceil(nbodies/2)>> >(nbodies, Gbodies);
+	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+
+	//Scaling
+	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+	scale_bodies_GPU << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies, RECIP_DT);
+	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
 
 	//copy data back to CPU
-	cudaMemcpy(bodies, Gbodies, nbodies, cudaMemcpyDeviceToHost);
+	//cudaMemcpy(bodies, Gbodies, nbodies, cudaMemcpyDeviceToHost);
 
 	//Free up the memory
 	cudaFree(Gbodies);
@@ -252,16 +308,21 @@ int main(int argc, char ** argv)
   auto t1 = std::chrono::steady_clock::now();
   offset_momentum(nbodies, bodies);
   type e1 = energy(nbodies, bodies);
-  scale_bodies(nbodies, bodies, DT);
-  for (int i = 1; i <= niters; ++i)  
+ 
+  if (GPUTEST)
   {
-	  if (GPUTEST)
-		kernalUpdate(nbodies, bodies);
-	  else
-		advance(nbodies, bodies);
+	  for (auto i = 0; i < niters; ++i)
+		  kernalUpdate(nbodies, bodies);
   }
-  scale_bodies(nbodies, bodies, RECIP_DT);
-
+	else
+	{
+		  scale_bodies(nbodies, bodies, DT);
+		  for (int i = 1; i <= niters; ++i)  {
+		    advance(nbodies, bodies);
+		  }
+		  scale_bodies(nbodies, bodies, RECIP_DT);
+	}
+	 
   type e2 = energy(nbodies, bodies);
   auto t2 = std::chrono::steady_clock::now();
   auto diff = t2 - t1;

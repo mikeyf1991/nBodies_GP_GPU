@@ -21,6 +21,9 @@
   <ItemGroup>
     <CudaCompile Include="nbody.cu" />
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="nbody.cpp" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{51A92040-E8D7-4D23-B793-3152C00DD080}</ProjectGuid>
     <RootNamespace>Nbodies</RootNamespace>
