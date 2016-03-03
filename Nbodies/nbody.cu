@@ -254,9 +254,13 @@ void init_random_bodies(int nbodies, planet<T> *bodies)
 }
 
 template <typename T>
-void kernalUpdate(int nbodies, planet<T> *bodies)
+void kernalUpdate(int nbodies, planet<T> *bodies, int niters)
 {
 	planet<T> *Gbodies;
+	/*
+	DEVICE = GPU
+	HOST = CPU
+	*/
 
 	//Copy data from CPU
 	cudaMalloc(&Gbodies, nbodies*sizeof(planet<T>));
@@ -266,16 +270,18 @@ void kernalUpdate(int nbodies, planet<T> *bodies)
 	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
 	scale_bodies_GPU << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies, DT);
 	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+	for (auto i = 0; i < niters; ++i)
+	{
+		//velocity
+		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+		adv_Velocity_Update << <1, nbodies >> >(nbodies, Gbodies);
+		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
 
-	//velocity
-	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-	adv_Velocity_Update<<<1, nbodies>>>(nbodies, Gbodies);
-	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-
-	//position
-	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-	adv_Position_Update << <nbodies, ceil(nbodies/2)>> >(nbodies, Gbodies);
-	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+		//position
+		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+		adv_Position_Update << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies);
+		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+	}
 
 	//Scaling
 	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
@@ -283,7 +289,7 @@ void kernalUpdate(int nbodies, planet<T> *bodies)
 	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
 
 	//copy data back to CPU
-	//cudaMemcpy(bodies, Gbodies, nbodies, cudaMemcpyDeviceToHost);
+	cudaMemcpy(bodies, Gbodies, nbodies, cudaMemcpyDeviceToHost);
 
 	//Free up the memory
 	cudaFree(Gbodies);
@@ -311,15 +317,17 @@ int main(int argc, char ** argv)
  
   if (GPUTEST)
   {
-	  for (auto i = 0; i < niters; ++i)
-		  kernalUpdate(nbodies, bodies);
+	 // for (auto i = 0; i < niters; ++i)
+		  kernalUpdate(nbodies, bodies, niters);
   }
 	else
 	{
 		  scale_bodies(nbodies, bodies, DT);
-		  for (int i = 1; i <= niters; ++i)  {
+		  for (int i = 1; i <= niters; ++i)  
+		  {
 		    advance(nbodies, bodies);
 		  }
+
 		  scale_bodies(nbodies, bodies, RECIP_DT);
 	}
 	 
