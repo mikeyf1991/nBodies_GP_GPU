@@ -253,93 +253,71 @@ void init_random_bodies(int nbodies, planet<T> *bodies)
   }
 }
 
-template <typename T>
-void kernalUpdate(int nbodies, planet<T> *bodies, int niters)
-{
-	planet<T> *Gbodies;
-	/*
-	DEVICE = GPU
-	HOST = CPU
-	*/
-
-	//Copy data from CPU
-	cudaMalloc(&Gbodies, nbodies*sizeof(planet<T>));
-	cudaMemcpy(Gbodies, bodies, nbodies, cudaMemcpyHostToDevice);
-
-	//Scaling
-	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-	scale_bodies_GPU << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies, DT);
-	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-	for (auto i = 0; i < niters; ++i)
-	{
-		//velocity
-		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-		adv_Velocity_Update << <1, nbodies >> >(nbodies, Gbodies);
-		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-
-		//position
-		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-		adv_Position_Update << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies);
-		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-	}
-
-	//Scaling
-	cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-	scale_bodies_GPU << <nbodies, ceil(nbodies / 2) >> >(nbodies, Gbodies, RECIP_DT);
-	cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-
-	//copy data back to CPU
-	cudaMemcpy(bodies, Gbodies, nbodies, cudaMemcpyDeviceToHost);
-
-	//Free up the memory
-	cudaFree(Gbodies);
-}
-
 int main(int argc, char ** argv)
 {
-  int niters = 1000, nbodies = 5;
-  if (argc > 1) { niters  = atoi(argv[1]); }
-  if (argc > 2) { nbodies = atoi(argv[2]); }
+		int niters = 1000, nbodies = 5;
+		if (argc > 1) { niters = atoi(argv[1]); }
+		if (argc > 2) { nbodies = atoi(argv[2]); }
+	
+		std::cout << "niters=" << niters << " nbodies=" << nbodies << '\n';
+	
+		planet<type> *bodies;
+		planet<type> *Gbodies;
 
-  std::cout << "niters=" << niters << " nbodies=" << nbodies << '\n';
+		if (argc == 1) {
+			bodies = golden_bodies; // Check accuracy with 1000 solar system iterations
+		}
+		else {
+			bodies = new planet<type>[nbodies];
+			init_random_bodies(nbodies, bodies);
+		}
+	
+		auto t1 = std::chrono::steady_clock::now();
 
-  planet<type> *bodies;
-  if (argc == 1) { 
-    bodies = golden_bodies; // Check accuracy with 1000 solar system iterations
-  } else {
-    bodies = new planet<type>[nbodies];
-    init_random_bodies(nbodies, bodies);
-  }
+		offset_momentum(nbodies, bodies);
+		type e1 = energy(nbodies, bodies);
+		if (!GPUTEST)
+		{
+			scale_bodies(nbodies, bodies, DT);
+			for (int i = 1; i <= niters; ++i)  {
+				advance(nbodies, bodies);
+			}
+			scale_bodies(nbodies, bodies, RECIP_DT);
+		}
+		else
+		{
+			cudaMalloc(&Gbodies, nbodies*sizeof(planet<type>));
+			cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
 
-  auto t1 = std::chrono::steady_clock::now();
-  offset_momentum(nbodies, bodies);
-  type e1 = energy(nbodies, bodies);
- 
-  if (GPUTEST)
-  {
-	 // for (auto i = 0; i < niters; ++i)
-		  kernalUpdate(nbodies, bodies, niters);
-  }
-	else
-	{
-		  scale_bodies(nbodies, bodies, DT);
-		  for (int i = 1; i <= niters; ++i)  
-		  {
-		    advance(nbodies, bodies);
-		  }
+			//Scaling
+			scale_bodies_GPU<<<nbodies, ceil(nbodies / 2)>>>(nbodies, Gbodies, DT);
+			for (auto i = 0; i < niters; ++i)
+			{
+				//velocity
+				adv_Velocity_Update<<<1, nbodies>>>(nbodies, Gbodies);
+				//position
+				adv_Position_Update<<<nbodies, ceil(nbodies / 2)>>>(nbodies, Gbodies);
+			}
 
-		  scale_bodies(nbodies, bodies, RECIP_DT);
-	}
-	 
-  type e2 = energy(nbodies, bodies);
-  auto t2 = std::chrono::steady_clock::now();
-  auto diff = t2 - t1;
+			//Scaling
+			scale_bodies_GPU<<<nbodies, ceil(nbodies / 2) >>>(nbodies, Gbodies, RECIP_DT);
 
-  std::cout << std::setprecision(9);
-  std::cout << e1 << '\n' << e2 << '\n';
-  std::cout << std::fixed << std::setprecision(3);
-  std::cout << std::chrono::duration<double>(diff).count() << " seconds.\n";
+			//copy data back to CPU
+			cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
 
-  if (argc != 1) { delete [] bodies; }
-  return 0;
+			//Free up the memory
+			cudaFree(Gbodies);
+		}
+
+		type e2 = energy(nbodies, bodies);
+		auto t2 = std::chrono::steady_clock::now();
+		auto diff = t2 - t1;
+	
+		std::cout << std::setprecision(9);
+		std::cout << e1 << '\n' << e2 << '\n';
+		std::cout << std::fixed << std::setprecision(3);
+		std::cout << std::chrono::duration<double>(diff).count() << " seconds.\n";
+	
+		if (argc != 1) { delete[] bodies; }
+		return 0;
 }
