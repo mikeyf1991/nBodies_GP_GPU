@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="nbody.cu" />
+    <CudaCompile Include="tmp.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="nbody.cpp" />

@@ -107,29 +107,80 @@ __global__ void scale_bodies_GPU(int nbodies, planet<T> *bodies, T scale)
 		bodies[i].vz *= scale;
 	}
 }
+//
+//template <typename T>
+//__device__ void energy_Reduction(int nbodies, planet<T> *bodies)
+//{
+//	extern __shared__ planet<T> sharedPlanet;
+//	
+//	unsigned int threadID = threadIdx.x;
+//	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
+//}
 
 template <typename T>
-__global__ void energy_GPU(int nbodies, planet<T> *bodies)
+__global__ void energy_GPU(int nbodies, T *addReduc, T *subReduc, planet<T> *bodies)
 {
-	T e = 0.0;
-	int i = threadIdx.x + blockIdx.x*blockDim.x;
-	int j = i + 1;
+	extern __shared__ T e[];
+
+	//T e = 0.0;
+	unsigned int threadID = threadIdx.x;
+
+	unsigned int i = threadIdx.x + blockIdx.x*blockDim.x;
+
+
 
 	if (i < nbodies)
 	{
 		planet<T> &b = bodies[i];
-		e += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
-		if (j < nbodies)
+		e[threadID] = 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
+	}
+	__syncthreads();
+
+	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+	{
+		if (threadID < stride)
 		{
-			planet<T> &b2 = bodies[j];
+			e[threadID] += e[threadID + stride];
+		}
+		__syncthreads();
+	}
+	if (threadID == 0)
+	{
+		addReduc[blockIdx.x] = e[0];
+	}
+
+	__syncthreads();
+	e[threadID] = 0;
+
+	if (i < nbodies)
+	{
+		for (int iter = i + 1; iter < nbodies; iter++){
+			planet<T> &b = bodies[i];
+			planet<T> &b2 = bodies[iter];
 			T dx = b.x - b2.x;
 			T dy = b.y - b2.y;
 			T dz = b.z - b2.z;
 			T distance = sqrt(dx * dx + dy * dy + dz * dz);
-			e -= (b.mass * b2.mass) / distance;
+			T var = ((b.mass * b2.mass) / distance);
+			e[threadID] += var;
 		}
 	}
-	//return e; need to return this type
+
+	__syncthreads();
+
+	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+	{
+		if (threadID < stride)
+		{
+			e[threadID] += e[threadID + stride];
+		}
+		__syncthreads();
+	}
+
+	if (threadID == 0)
+	{
+		subReduc[blockIdx.x] = e[0];
+	}
 }
 
 template <typename T>
@@ -353,7 +404,7 @@ int isPowerOfTwo(unsigned int x)
 }
 
 template <typename T>
-void offSetMomentum(int nbodies, planet<T> *Gbodies)
+void callOffSet(int nbodies, planet<T> *Gbodies)
 {
 	T *d_Array;
 
@@ -363,6 +414,30 @@ void offSetMomentum(int nbodies, planet<T> *Gbodies)
 
 	cudaFree(d_Array);
 }
+
+template <typename T>
+T callEnergy(int nbodies, planet<T> *Gbodies)
+{
+	
+	T *h_addArray = new T[gridSize];
+	T *h_subArray = new T[gridSize];
+
+	T *d_addArray; cudaMalloc((void**)&d_addArray, gridSize * sizeof(T));
+	T *d_subArray; cudaMalloc((void**)&d_subArray, gridSize * sizeof(T));
+
+	energy_GPU << <gridSize, blockSize, nbodies * sizeof(T) >> >(nbodies, d_addArray, d_subArray, Gbodies);
+	cudaMemcpy(h_addArray, d_addArray, gridSize * sizeof(T), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_subArray, d_subArray, gridSize * sizeof(T), cudaMemcpyDeviceToHost);
+
+	for (int i = 1; i < gridSize; i++){
+		h_addArray[0] += h_addArray[i];
+		h_subArray[0] += h_subArray[i];
+	}
+
+	T e = h_addArray[0] - h_subArray[0];
+
+	return e;
+	}
 
 int main(int argc, char ** argv)
 {
@@ -378,6 +453,9 @@ int main(int argc, char ** argv)
 	type e1, e2;
 	auto t1 = std::chrono::steady_clock::now();
 	auto t2 = std::chrono::steady_clock::now();
+
+	auto Tadv = std::chrono::steady_clock::now();
+	auto Tadv2 = std::chrono::steady_clock::now();
 
 	if (argc == 1) {
 		bodies = golden_bodies; // Check accuracy with 1000 solar system iterations
@@ -423,15 +501,18 @@ int main(int argc, char ** argv)
 
 		t1 = std::chrono::steady_clock::now();
 
-		offSetMomentum(nbodies, Gbodies);
+		callOffSet(nbodies, Gbodies);
 		cudaThreadSynchronize();
 
-		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-		e1 = energy(nbodies, bodies);
-		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+		//cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+		//e1 = energy(nbodies, bodies);
+		//cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
+		e1 = callEnergy(nbodies, Gbodies);
 
 		//Scaling
 		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, DT);
+
+		Tadv = std::chrono::steady_clock::now();
 		for (auto i = 0; i < niters; ++i)
 		{
 			//velocity
@@ -439,13 +520,15 @@ int main(int argc, char ** argv)
 			//position
 			adv_Position_Update << <gridSize, blockSize >> >(nbodies, Gbodies);
 		}
+		Tadv2 = std::chrono::steady_clock::now();
 
-		//Scaling
+		//Scaling2
 		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, RECIP_DT);
 
-		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-		e2 = energy(nbodies, bodies);
-		
+		//cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+		//e2 = energy(nbodies, bodies);
+		e2 = callEnergy(nbodies, Gbodies);
+
 		t2 = std::chrono::steady_clock::now();
 
 		//copy data back to CPU
@@ -457,11 +540,13 @@ int main(int argc, char ** argv)
 
 	//auto t2 = std::chrono::steady_clock::now();
 	auto diff = t2 - t1;
+	auto diff2 = Tadv2 - Tadv;
 
 	std::cout << std::setprecision(9);
 	std::cout << e1 << '\n' << e2 << '\n';
-	std::cout << std::fixed << std::setprecision(3);
+	//std::cout << std::fixed << std::setprecision(3);
 	std::cout << std::chrono::duration<double>(diff).count() << " seconds.\n";
+	std::cout <<"adv: " << std::chrono::duration<double>(diff2).count() << " seconds.\n";
 	delete[]outData;
 	if (argc != 1) { delete[] bodies; }
 	return 0;
