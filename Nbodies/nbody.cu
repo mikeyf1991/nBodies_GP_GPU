@@ -7,8 +7,13 @@
    The output of this shows the energy before and after the simulation,
    and should be:
 
+   double:
    -0.169075164
    -0.169087605
+
+   float:
+   -0.169075206
+   -0.169086471
    */
 
 #include <cuda_runtime.h>
@@ -29,7 +34,7 @@
 #define GPUTEST 1
 
 
-using type = double;
+using type = float;
 
 const type pi{ 3.141592653589793 };
 const type solar_mass{ 4 * pi * pi };
@@ -76,6 +81,11 @@ __global__ void adv_Velocity_Update(int nbodies, planet<T> *bodies)
 			b2.vy += dy * b1.mass  * mag;
 			b2.vz += dz * b1.mass  * mag;
 		}
+
+		planet<T> &b = bodies[i];
+		b.x += b.vx;
+		b.y += b.vy;
+		b.z += b.vz;
 	}
 }
 
@@ -107,15 +117,6 @@ __global__ void scale_bodies_GPU(int nbodies, planet<T> *bodies, T scale)
 		bodies[i].vz *= scale;
 	}
 }
-//
-//template <typename T>
-//__device__ void energy_Reduction(int nbodies, planet<T> *bodies)
-//{
-//	extern __shared__ planet<T> sharedPlanet;
-//	
-//	unsigned int threadID = threadIdx.x;
-//	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
-//}
 
 template <typename T>
 __global__ void energy_GPU(int nbodies, T *addReduc, T *subReduc, planet<T> *bodies)
@@ -365,7 +366,7 @@ struct planet<type> golden_bodies[5] = {
 };
 
 const type DT{ 1e-2 };
-const type RECIP_DT{ 1.0 / DT };
+const type RECIP_DT{ static_cast<type>(1.0) / DT };
 
 /*
  * Rescale certain properties of bodies. That allows doing
@@ -501,33 +502,30 @@ int main(int argc, char ** argv)
 
 		t1 = std::chrono::steady_clock::now();
 
+		//offset_momentum(nbodies, bodies);
 		callOffSet(nbodies, Gbodies);
 		cudaThreadSynchronize();
 
-		//cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-		//e1 = energy(nbodies, bodies);
-		//cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
-		e1 = callEnergy(nbodies, Gbodies);
+		e1 = energy(nbodies, bodies); //callEnergy(nbodies, Gbodies);
 
 		//Scaling
-		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, DT);
+		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, DT);//scale_bodies(nbodies, bodies, DT);
 
 		Tadv = std::chrono::steady_clock::now();
 		for (auto i = 0; i < niters; ++i)
 		{
-			//velocity
-			adv_Velocity_Update << <1, nbodies >> >(nbodies, Gbodies);
-			//position
-			adv_Position_Update << <gridSize, blockSize >> >(nbodies, Gbodies);
+			//Advaced
+			adv_Velocity_Update << <gridSize, blockSize >> >(nbodies, Gbodies);
+
+			//adv_Position_Update << <gridSize, blockSize >> >(nbodies, Gbodies);
 		}
 		Tadv2 = std::chrono::steady_clock::now();
 
 		//Scaling2
 		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, RECIP_DT);
 
-		//cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
-		//e2 = energy(nbodies, bodies);
-		e2 = callEnergy(nbodies, Gbodies);
+
+		e2 = energy(nbodies, bodies); //callEnergy(nbodies, Gbodies);
 
 		t2 = std::chrono::steady_clock::now();
 
