@@ -27,11 +27,12 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <fstream>
 #include <curand.h>
 #include <curand_kernel.h>
 #include <algorithm>
 
-#define GPUTEST 0
+#define GPUTEST 1
 
 
 using type = float;
@@ -45,6 +46,8 @@ int mingridSize;
 int gridSize;
 
 type *outData;
+
+std::ofstream file;
 
 
 template <typename T>
@@ -417,64 +420,72 @@ void callOffSet(int nbodies, planet<T> *Gbodies)
 //	return e;
 //	}
 
-int main(int argc, char ** argv)
+void writeToFile(int numIter, int numBodies, double timeToMomentum, /*float energy1,*/ double timeToScale, double timeToAdvance, double timeToScale2, /*float energy2,*/ double total)
 {
-	int niters = 1000, nbodies = 5;
-	if (argc > 1) { niters = atoi(argv[1]); }
-	if (argc > 2) { nbodies = atoi(argv[2]); }
+	file << numIter << "," << numBodies << "," << timeToScale << ',' << timeToScale2 << "," << timeToAdvance << "," << timeToMomentum << "," <</* energy1 << ',' << energy2 << ',' <<*/ total << "\n";
+}
 
-	std::cout << "niters=" << niters << " nbodies=" << nbodies << '\n';
+template <typename T>
+void gpuLoops(int niters, int nbodies)
+{
+	
+		type e1, e2;
+		auto t1 = std::chrono::steady_clock::now();
+		auto t2 = std::chrono::steady_clock::now();
 
-	planet<type> *bodies;
-	planet<type> *Gbodies;
+		auto Tadv = std::chrono::steady_clock::now();
+		auto Tadv2 = std::chrono::steady_clock::now();
 
-	type e1, e2;
-	auto t1 = std::chrono::steady_clock::now();
-	auto t2 = std::chrono::steady_clock::now();
+		/*auto t1 = std::chrono::steady_clock::now();
+		auto t2 = std::chrono::steady_clock::now();*/
 
-	auto Tadv = std::chrono::steady_clock::now();
-	auto Tadv2 = std::chrono::steady_clock::now();
+		auto momentumStart = std::chrono::steady_clock::now();
+		auto momentumEnd = std::chrono::steady_clock::now();
 
-	if (argc == 1) {
-		bodies = golden_bodies; // Check accuracy with 1000 solar system iterations
-	}
-	else {
-		bodies = new planet<type>[nbodies];
-		init_random_bodies(nbodies, bodies);
-	}
+		//auto energyStart1 = std::chrono::steady_clock::now();
+		//auto energyEnd1 = std::chrono::steady_clock::now();
 
-	outData = new type[gridSize];
+		auto scaleStart1 = std::chrono::steady_clock::now();
+		auto scaleEnd1 = std::chrono::steady_clock::now();
 
+		auto advStart = std::chrono::steady_clock::now();
+		auto advEnd = std::chrono::steady_clock::now();
 
-	if (!GPUTEST)
-	{
-		t1 = std::chrono::steady_clock::now();
-		offset_momentum(nbodies, bodies);
-		e1 = energy(nbodies, bodies);
-		scale_bodies(nbodies, bodies, DT);
-		for (int i = 1; i <= niters; ++i)  {
-			advance(nbodies, bodies);
+		auto scaleStart2 = std::chrono::steady_clock::now();
+		auto scaleEnd2 = std::chrono::steady_clock::now();
+
+		planet<type> *bodies;
+		if (nbodies == 5) {
+			bodies = golden_bodies; // Check accuracy with 1000 solar system iterations
 		}
-		scale_bodies(nbodies, bodies, RECIP_DT);
+		else {
+			bodies = new planet<type>[nbodies];
+			init_random_bodies(nbodies, bodies);
+		}
+		planet<type> *Gbodies;
 
-		e2 = energy(nbodies, bodies);
-		t2 = std::chrono::steady_clock::now();
-	}
-	else
-	{
 		cudaMalloc(&Gbodies, nbodies*sizeof(planet<type>));
 		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
 
-		//cudaOccupancyMaxPotentialBlockSize(&mingridSize, &blockSize, scale_bodies_GPU<type>, 0, nbodies);
 		int maxThreads;
 		cudaDeviceGetAttribute(&maxThreads, cudaDevAttrMaxThreadsPerBlock, 0);
-		blockSize = maxThreads;
+		if (nbodies < maxThreads)
+			blockSize = nbodies;
+		else
+			blockSize = maxThreads;
 		gridSize = (nbodies + blockSize) / blockSize;
-		
 
 		t1 = std::chrono::steady_clock::now();
 
+		momentumStart = std::chrono::steady_clock::now();
 		callOffSet(nbodies, Gbodies);
+		momentumEnd = std::chrono::steady_clock::now();
+
+		cudaError_t error = cudaGetLastError();
+		if (error != cudaSuccess)
+		{
+			std::cout << "Error in position kernal: " << cudaGetErrorString(error) << std::endl;
+		}
 		cudaThreadSynchronize();
 
 		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
@@ -482,42 +493,111 @@ int main(int argc, char ** argv)
 		cudaMemcpy(Gbodies, bodies, nbodies*sizeof(planet<type>), cudaMemcpyHostToDevice);
 
 		//Scaling initial
+		scaleStart1 = std::chrono::steady_clock::now();
 		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, DT);
+		scaleEnd1 = std::chrono::steady_clock::now();
 
-		Tadv = std::chrono::steady_clock::now();
+
+		//Tadv = std::chrono::steady_clock::now();
+		advStart = std::chrono::steady_clock::now();
 		for (auto i = 0; i < niters; ++i)
 		{
 			//Calling advanced
 			adv_Update_GPU << <gridSize, blockSize >> >(nbodies, Gbodies);
-		//	adv_Position_Update << <gridSize, blockSize >> >(nbodies, Gbodies);
+			cudaDeviceSynchronize();
+
+			//	adv_Position_Update << <gridSize, blockSize >> >(nbodies, Gbodies);
 		}
-		Tadv2 = std::chrono::steady_clock::now();
+		advEnd = std::chrono::steady_clock::now();
 
 		//Scaling again
+		scaleStart2 = std::chrono::steady_clock::now();
 		scale_bodies_GPU << <gridSize, blockSize >> >(nbodies, Gbodies, RECIP_DT);
+		scaleEnd2 = std::chrono::steady_clock::now();
 
 		cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
 		e2 = energy(nbodies, bodies);
 
 		t2 = std::chrono::steady_clock::now();
 
-		//copy data back to CPU
-		//cudaMemcpy(bodies, Gbodies, nbodies*sizeof(planet<type>), cudaMemcpyDeviceToHost);
+		auto momDiff = momentumEnd - momentumStart;
+		auto TimeMom = std::chrono::duration<double>(momDiff).count();
 
+		//auto energyDiff = Tenergy2 - Tenergy;
+		//auto  TimeEnergy = std::chrono::duration<double>(energyDiff).count();
+
+		auto scaleDiff = scaleEnd1 - scaleStart1;
+		auto TimeSc = std::chrono::duration<double>(scaleDiff).count();
+
+		auto advDiff = advEnd - advStart;
+		auto TimeAdv = std::chrono::duration<double>(advDiff).count();
+
+		auto scale2Diff = scaleEnd2 - scaleStart2;
+		auto TimeSc2 = std::chrono::duration<double>(scale2Diff).count();
+
+		//auto energy2Diff = Tenergy2 - Tenergy;
+		//auto  TimeEnergy2 = std::chrono::duration<double>(energy2Diff).count();
+
+		auto diff = t2 - t1;
+		auto TimeTotal = std::chrono::duration<double>(diff).count();
+
+		writeToFile(niters, nbodies, TimeMom, /*energy1T*/ TimeSc, TimeAdv, TimeSc, /*energy2T*/ TimeTotal);
+		std::cout << "part done \n";
+}
+
+int main(int argc, char ** argv)
+{
+	int niters = 1000, nbodies = 900;
+	if (argc > 1) { niters = atoi(argv[1]); }
+	if (argc > 2) { nbodies = atoi(argv[2]); }
+
+	std::cout << "niters=" << niters << " nbodies=" << nbodies << '\n';
+
+	outData = new type[gridSize];
+
+
+	//if (!GPUTEST)
+	//{
+	//	t1 = std::chrono::steady_clock::now();
+	//	offset_momentum(nbodies, bodies);
+	//	e1 = energy(nbodies, bodies);
+	//	scale_bodies(nbodies, bodies, DT);
+	//	for (int i = 1; i <= niters; ++i)  {
+	//		advance(nbodies, bodies);
+	//	}
+	//	scale_bodies(nbodies, bodies, RECIP_DT);
+
+	//	e2 = energy(nbodies, bodies);
+	//	t2 = std::chrono::steady_clock::now();
+	//}
+	
+		file.open("Test.csv");
+		file << "Iterations" << ',' << "Body Count" << ',' << "Time for Scale" << ',' << "Time for Scale 2" << ',' << "Time for Advance" << ',' << "Time for Momentum" << ',' <</* "Energy Before" << ',' << "Energy After" << ',' <<*/ "Total" << '\n';
+		for (nbodies = 100; nbodies <= 1000; nbodies += 100)
+		{
+			for (niters = 100; niters <= 1000; niters += 100)
+			{
+	
+				gpuLoops<type>(niters, nbodies);
+			}
+		}
+		file.close();
 		//Free up the memory
-		cudaFree(Gbodies);
-	}
+	/*	cudaFree(Gbodies);
+	}*/
 
-	auto diff = t2 - t1;
+	/*auto diff = t2 - t1;
 	auto diff2 = Tadv2 - Tadv;
 
 	std::cout << std::setprecision(9);
 	std::cout << e1 << '\n' << e2 << '\n';
 	std::cout << std::chrono::duration<double>(diff).count() << " seconds.\n";
 	std::cout <<"adv: " << std::chrono::duration<double>(diff2).count() << " seconds.\n";
-	std::cout << "GridSize: " << gridSize << std::endl;
-	
+	std::cout << "GridSize: " << gridSize << std::endl;*/
+	std::cout << "DONE \n";
+	std::cin.get();
+
 	delete[]outData;
-	if (argc != 1) { delete[] bodies; }
+	//if (argc != 1) { delete[] bodies; }
 	return 0;
 }
